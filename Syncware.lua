@@ -7,9 +7,9 @@ local mouse = lp:GetMouse()
 
 -- re-run safety: tear down the previous session
 local env = (getgenv and getgenv()) or _G
-if env.BenchUnload then pcall(env.BenchUnload) end
+if env.SyncwareUnload then pcall(env.SyncwareUnload) end
 local session = {}
-env.BenchSession = session
+env.SyncwareSession = session
 local conns, drawings = {}, {}
 
 local function on(signal, fn)
@@ -25,6 +25,7 @@ local CFG = {
     fill = Color3.fromRGB(128, 128, 128),
     fillOpacity = 0.35,
     thickness = 1,
+    names = true,          -- player name above each box (follows the ESP color)
     espDistance = 5000,
 
     -- Silent aim
@@ -40,6 +41,38 @@ local CFG = {
     fovThickness = 1,
 
     teamCheck = false,
+
+    -- Fly
+    fly = false,
+    flySpeed = 60,
+    flyKey = "F",          -- press to toggle fly (KeyCode name or MouseButton1/2/3)
+    noclip = false,        -- walk through walls and parts
+    gun = false,           -- gun aura: multi-target ShootGunEvent bursts while a Gun tool is held
+    gunRange = 1000,       -- studs
+    gunBurst = 12,         -- shots per Heartbeat, split across targets
+    gunCacheShots = 10,    -- shots sent per validator code before generating the next one
+    gunMaxTargets = 10,    -- nearest N targets per burst (spread mode)
+    gunMode = "spread",    -- "spread" = shots split across targets; "single" = whole burst on one target until it dies, then the next
+    npcCheck = false,      -- on = ESP, silent aim, Khel Khatam and Gun ignore NPCs (players only)
+    autoV3 = false,        -- keeps firing the race ability (V3) every autoV3Interval seconds
+    autoV3Interval = 3,
+    autoV4 = false,        -- presses Y for V4 whenever the gauge is full and V4 is not already on
+    antiStun = false,      -- zeroes the character's Stun value every frame
+    orbit = false,         -- circle the selected player (pick one in the SuS tab)
+    orbitSpeed = 3,        -- radians per second
+    orbitRadius = 12,      -- studs from the target
+    orbitTweenSpeed = 250, -- studs per second while flying in to the target before orbiting
+    orbitHeight = 0,       -- studs above the target's root
+    khelKhatam = false,    -- kill aura: hits every living player/NPC in range via RegisterAttack/RegisterHit
+    stick = false,         -- tween to the selected player and stay glued to them (pick one in the SuS tab)
+    stickSpeed = 250,      -- studs per second while flying in
+    stickDistance = 3,     -- studs behind the target (0 = on top of them)
+    safeMode = false,      -- when HP% drops below safeHP, tween up to the sky and hold until HP recovers
+    safeHP = 35,           -- HP percent threshold
+    safeRecover = 2000,    -- HP that must be regained above the threshold before coming back down
+    safeHeight = 3000,     -- studs above where you were
+    safeSpeed = 600,       -- studs per second, up and back down
+    auraRange = 100,       -- studs; widen with the slider if hits still land
 
     -- Performance
     fpsBoost = false,
@@ -111,13 +144,23 @@ local function newBox()
     outline.Transparency = 1
     outline.Visible = false
 
-    return {outline = outline, fill = fill}
+    local name = draw("Text")
+    name.Center = true
+    name.Outline = true
+    name.Size = 13
+    name.Color = CFG.outline
+    name.Transparency = 1
+    name.Text = ""
+    name.Visible = false
+
+    return {outline = outline, fill = fill, name = name}
 end
 
 local function hide(b)
     if b then
         b.outline.Visible = false
         b.fill.Visible = false
+        b.name.Visible = false
     end
 end
 
@@ -130,6 +173,7 @@ local function removePlayer(p)
     if b then
         pcall(function() b.outline:Remove() end)
         pcall(function() b.fill:Remove() end)
+        pcall(function() b.name:Remove() end)
         boxes[p] = nil
     end
 end
@@ -194,6 +238,7 @@ on(RunService.RenderStepped, function()
             local root = char and char:FindFirstChild("HumanoidRootPart")
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             local alive = myRoot and root and hum and hum.Health > 0 and not isTeammate(plr)
+                and not (CFG.npcCheck and Players:GetPlayerFromCharacter(char) ~= plr)
 
             if not alive then
                 hide(b)
@@ -201,7 +246,7 @@ on(RunService.RenderStepped, function()
                 local dist = (root.Position - myRoot.Position).Magnitude
 
                 -- ESP box
-                if b and CFG.esp and dist <= CFG.espDistance then
+                if b and (CFG.esp or CFG.names) and dist <= CFG.espDistance then
                     local center, onScreen = cam:WorldToViewportPoint(root.Position)
                     if onScreen then
                         local top = cam:WorldToViewportPoint(root.Position + Vector3.new(0, 2.8, 0))
@@ -211,10 +256,25 @@ on(RunService.RenderStepped, function()
                         local pos = Vector2.new(center.X - w / 2, top.Y)
                         local size = Vector2.new(w, h)
 
-                        b.fill.Position, b.fill.Size = pos, size
-                        b.outline.Position, b.outline.Size = pos, size
-                        b.fill.Visible = not CFG.fpsSuper   -- super boost: outline only, half the Drawing cost
-                        b.outline.Visible = true
+                        if CFG.esp then
+                            b.fill.Position, b.fill.Size = pos, size
+                            b.outline.Position, b.outline.Size = pos, size
+                            b.fill.Visible = not CFG.fpsSuper   -- super boost: outline only, half the Drawing cost
+                            b.outline.Visible = true
+                        else
+                            b.fill.Visible = false
+                            b.outline.Visible = false
+                        end
+
+                        if CFG.names then
+                            local t = b.name
+                            t.Text = (plr.DisplayName ~= plr.Name) and (plr.DisplayName .. " (@" .. plr.Name .. ")") or plr.Name
+                            t.Color = CFG.outline
+                            t.Position = Vector2.new(center.X, top.Y - 16)
+                            t.Visible = true
+                        else
+                            b.name.Visible = false
+                        end
                     else
                         hide(b)
                     end
@@ -252,16 +312,18 @@ end)
 -- UI
 ------------------------------------------------------------------
 local THEME = {
-    bg = Color3.fromRGB(0, 0, 0),
-    bar = Color3.fromRGB(8, 8, 8),
-    row = Color3.fromRGB(16, 16, 16),
-    accent = Color3.fromRGB(46, 230, 120),    -- toggles, sliders, active tab, outlines
-    off = Color3.fromRGB(45, 45, 50),
-    text = Color3.fromRGB(235, 235, 240),
+    bg = Color3.fromRGB(246, 246, 242),       -- "minimal light": warm off-white card
+    bar = Color3.fromRGB(246, 246, 242),
+    row = Color3.fromRGB(255, 255, 255),
+    accent = Color3.fromRGB(59, 108, 240),    -- toggles, sliders, active tab
+    off = Color3.fromRGB(212, 214, 220),
+    text = Color3.fromRGB(36, 38, 44),
+    muted = Color3.fromRGB(122, 125, 134),
+    stroke = Color3.fromRGB(224, 224, 218),
     dollar = Color3.fromRGB(255, 255, 255),   -- tint of the $ image (white = as supplied; try the accent green)
 }
-local ROW_T = 0.2      -- row transparency so the background $ shows through
-local BG_DOLLAR_T = 0.86 -- background $ transparency (higher = fainter)
+local ROW_T = 0        -- row transparency so the background $ shows through
+local BG_DOLLAR_T = 1    -- background $ transparency (higher = fainter)
 
 -- $ image, embedded (white glyph on transparent), written to the executor workspace at runtime
 local DOLLAR_B64 = table.concat({
@@ -327,8 +389,8 @@ end
 local dollarAsset = nil
 if type(writefile) == "function" and type(getcustomasset) == "function" then
     pcall(function()
-        writefile("bench_dollar.png", b64decode(DOLLAR_B64))
-        dollarAsset = getcustomasset("bench_dollar.png")
+        writefile("syncware_dollar.png", b64decode(DOLLAR_B64))
+        dollarAsset = getcustomasset("syncware_dollar.png")
     end)
 end
 
@@ -381,8 +443,8 @@ local LOGO_B64 = table.concat({
 local logoAsset = nil
 if type(writefile) == "function" and type(getcustomasset) == "function" then
     pcall(function()
-        writefile("bench_logo.png", b64decode(LOGO_B64))
-        logoAsset = getcustomasset("bench_logo.png")
+        writefile("syncware_logo.png", b64decode(LOGO_B64))
+        logoAsset = getcustomasset("syncware_logo.png")
     end)
 end
 
@@ -421,7 +483,7 @@ local function guiParent()
 end
 
 local gui = make("ScreenGui", {
-    Name = "Bench", ResetOnSpawn = false, IgnoreGuiInset = true,
+    Name = "Syncware", ResetOnSpawn = false, IgnoreGuiInset = true,
     DisplayOrder = 999, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 })
 if syn and syn.protect_gui then pcall(syn.protect_gui, gui) end
@@ -464,11 +526,11 @@ else
 end
 
 local win = make("Frame", {
-    Size = UDim2.fromOffset(260, 340), Position = UDim2.fromOffset(76, 120),
+    Size = UDim2.fromOffset(300, 340), Position = UDim2.fromOffset(76, 120),
     BackgroundColor3 = THEME.bg, BorderSizePixel = 0, Visible = false,
 }, gui)
-corner(win, 8)
-make("UIStroke", {Color = THEME.accent, Thickness = 1, Transparency = 0.6}, win)
+corner(win, 12)
+make("UIStroke", {Color = THEME.stroke, Thickness = 1}, win)
 
 -- background $ decor (behind everything)
 local decor = make("Frame", {
@@ -477,22 +539,55 @@ local decor = make("Frame", {
 local bigDollar = dollarGfx(decor, 0, 0, 150, 223, 0, BG_DOLLAR_T, 1)  -- single centered $
 bigDollar.AnchorPoint = Vector2.new(0.5, 0.5)
 bigDollar.Position = UDim2.fromScale(0.5, 0.5)
+bigDollar.Visible = false
 
 local bar = make("TextLabel", {
     Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = THEME.bar, BorderSizePixel = 0,
     Text = "  $yncware", TextXAlignment = Enum.TextXAlignment.Left,
-    TextColor3 = THEME.accent, Font = Enum.Font.GothamBold, TextSize = 14, ZIndex = 2,
+    TextColor3 = THEME.text, Font = Enum.Font.GothamBold, TextSize = 14, ZIndex = 2,
 }, win)
-corner(bar, 8)
+corner(bar, 12)
+
+-- credit, sits right after the title text
+make("TextLabel", {
+    Size = UDim2.new(1, -130, 1, 0), Position = UDim2.fromOffset((bar.TextBounds.X > 0 and bar.TextBounds.X or 80) + 6, 0),
+    BackgroundTransparency = 1, Text = "made by .syncccc", TextXAlignment = Enum.TextXAlignment.Left,
+    TextColor3 = THEME.muted, Font = Enum.Font.Gotham, TextSize = 11,
+    Active = false, ZIndex = 3,
+}, bar)
 
 local closeBtn = make("TextButton", {
     Size = UDim2.fromOffset(30, 30), Position = UDim2.new(1, -30, 0, 0),
-    BackgroundTransparency = 1, Text = "x", TextColor3 = THEME.text,
+    BackgroundTransparency = 1, Text = "x", TextColor3 = THEME.muted,
     Font = Enum.Font.GothamBold, TextSize = 14, ZIndex = 3,
 }, win)
 
 -- open / close wired immediately, before anything else can fail
-local function setOpen(v) win.Visible = v end
+local TweenService = game:GetService("TweenService")
+local function tween(o, t, props, style)
+    local ok, tw = pcall(TweenService.Create, TweenService, o,
+        TweenInfo.new(t, style or Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props)
+    if ok then tw:Play() end
+    return tw
+end
+
+-- window open/close: quick scale pop instead of an instant flip
+local winScale = make("UIScale", {Scale = 1}, win)
+local openToken = 0
+local function setOpen(v)
+    openToken += 1
+    local my = openToken
+    if v then
+        winScale.Scale = 0.92
+        win.Visible = true
+        tween(winScale, 0.16, {Scale = 1}, Enum.EasingStyle.Back)
+    else
+        tween(winScale, 0.1, {Scale = 0.92})
+        task.delay(0.1, function()
+            if openToken == my then win.Visible = false end
+        end)
+    end
+end
 local openerMoved = false
 on(opener.Activated, function()
     if openerMoved then openerMoved = false return end
@@ -523,19 +618,23 @@ local function showPage(name)
     for n, p in pairs(pages) do p.Visible = (n == name) end
     for n, b in pairs(tabBtns) do
         local sel = (n == name)
-        b.BackgroundColor3 = sel and THEME.accent or THEME.row
-        b.TextColor3 = sel and Color3.fromRGB(0, 0, 0) or THEME.text
+        b.BackgroundColor3 = THEME.accent
+        tween(b, 0.15, {
+            BackgroundTransparency = sel and 0 or 1,
+            TextColor3 = sel and Color3.fromRGB(255, 255, 255) or THEME.muted,
+        })
     end
 end
 
 local function newPage(name)
     tabCount = tabCount + 1
     local btn = make("TextButton", {
-        Size = UDim2.new(1 / 3, -4, 1, 0), BackgroundColor3 = THEME.row, BackgroundTransparency = ROW_T,
-        BorderSizePixel = 0, Text = name, TextColor3 = THEME.text,
-        Font = Enum.Font.GothamBold, TextSize = 12, ZIndex = 2, LayoutOrder = tabCount,
+        Size = UDim2.new(1 / 6, -5, 1, 0), BackgroundColor3 = THEME.accent, BackgroundTransparency = 1,
+        BorderSizePixel = 0, Text = name, TextColor3 = THEME.muted, TextScaled = true,
+        Font = Enum.Font.GothamBold, ZIndex = 2, LayoutOrder = tabCount,
     }, tabRow)
-    corner(btn, 6)
+    corner(btn, 14)
+    make("UITextSizeConstraint", {MaxTextSize = 12, MinTextSize = 8}, btn)
     local page = make("ScrollingFrame", {
         Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
         ScrollBarThickness = 3, ScrollBarImageColor3 = THEME.accent, CanvasSize = UDim2.new(),
@@ -598,6 +697,7 @@ end
 
 -- controls share state through CFG; syncers keep duplicate toggles in step
 local syncers = {}
+local applyers = {}   -- key -> function(value): sets CFG, repaints the control, runs its onChange (the Configs tab loads through these)
 local function sync(key)
     for _, f in ipairs(syncers[key] or {}) do f() end
 end
@@ -610,14 +710,36 @@ local function toggle(parent, label, key, onChange)
     }, parent)
     corner(btn, 6)
     local pill = make("Frame", {
-        Size = UDim2.fromOffset(30, 14), Position = UDim2.new(1, -38, 0.5, -7),
+        Size = UDim2.fromOffset(34, 18), Position = UDim2.new(1, -44, 0.5, -9),
         BackgroundColor3 = THEME.off, BorderSizePixel = 0, ZIndex = 3,
     }, btn)
-    corner(pill, 7)
-    local function paint() pill.BackgroundColor3 = CFG[key] and THEME.accent or THEME.off end
+    corner(pill, 9)
+    local knob = make("Frame", {
+        Size = UDim2.fromOffset(14, 14), Position = UDim2.fromOffset(2, 2),
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255), BorderSizePixel = 0, ZIndex = 4,
+    }, pill)
+    corner(knob, 7)
+    local painted = false
+    local function paint()
+        local c = CFG[key] and THEME.accent or THEME.off
+        local pos = CFG[key] and UDim2.fromOffset(18, 2) or UDim2.fromOffset(2, 2)
+        if painted then
+            tween(pill, 0.15, {BackgroundColor3 = c})
+            tween(knob, 0.15, {Position = pos})
+        else
+            pill.BackgroundColor3, knob.Position = c, pos
+            painted = true
+        end
+    end
     paint()
     syncers[key] = syncers[key] or {}
     table.insert(syncers[key], paint)
+    applyers[key] = function(v)
+        if CFG[key] == v then return end
+        CFG[key] = v
+        sync(key)
+        if onChange then onChange(v) end
+    end
     on(btn.Activated, function()
         CFG[key] = not CFG[key]
         sync(key)
@@ -627,24 +749,24 @@ end
 
 local function slider(parent, label, key, min, max, step, onChange)
     local f = make("Frame", {
-        Size = UDim2.new(1, -6, 0, 40), BackgroundColor3 = THEME.row,
+        Size = UDim2.new(1, -6, 0, 30), BackgroundColor3 = THEME.row,
         BackgroundTransparency = ROW_T, BorderSizePixel = 0, ZIndex = 2,
     }, parent)
     corner(f, 6)
     local txt = make("TextLabel", {
-        Size = UDim2.new(1, -16, 0, 18), Position = UDim2.fromOffset(8, 3), BackgroundTransparency = 1,
+        Size = UDim2.new(0.5, -8, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1, TextTruncate = Enum.TextTruncate.AtEnd,
         TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = THEME.text,
         Font = Enum.Font.Gotham, TextSize = 12, ZIndex = 3,
     }, f)
     local track = make("Frame", {
-        Size = UDim2.new(1, -16, 0, 6), Position = UDim2.new(0, 8, 1, -12),
+        Size = UDim2.new(0.5, -14, 0, 4), Position = UDim2.new(0.5, 4, 0.5, -2),
         BackgroundColor3 = THEME.off, BorderSizePixel = 0, ZIndex = 3,
     }, f)
-    corner(track, 3)
+    corner(track, 2)
     local fill = make("Frame", {
         BackgroundColor3 = THEME.accent, BorderSizePixel = 0, Size = UDim2.fromScale(0, 1), ZIndex = 4,
     }, track)
-    corner(fill, 3)
+    corner(fill, 2)
 
     local function set(v)
         v = math.clamp(math.floor(v / step + 0.5) * step, min, max)
@@ -655,6 +777,7 @@ local function slider(parent, label, key, min, max, step, onChange)
         if onChange then onChange(v) end
     end
     set(CFG[key])
+    applyers[key] = function(v) if type(v) == "number" then set(v) end end
 
     local dragging = false
     local function fromInput(i)
@@ -686,8 +809,17 @@ local function cycle(parent, label, key, options)
         TextSize = 13, BorderSizePixel = 0, ZIndex = 2,
     }, parent)
     corner(btn, 6)
-    local function refresh() btn.Text = label .. ": " .. tostring(CFG[key]) end
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    local val = make("TextLabel", {
+        Size = UDim2.new(0.5, -10, 1, 0), Position = UDim2.fromScale(0.5, 0), BackgroundTransparency = 1,
+        TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = THEME.muted,
+        Font = Enum.Font.Gotham, TextSize = 13, ZIndex = 3,
+    }, btn)
+    local function refresh() btn.Text = "  " .. label; val.Text = tostring(CFG[key]) end
     refresh()
+    applyers[key] = function(v)
+        if table.find(options, v) then CFG[key] = v refresh() end
+    end
     on(btn.Activated, function()
         local idx = table.find(options, CFG[key]) or 0
         CFG[key] = options[idx % #options + 1]
@@ -710,10 +842,20 @@ local function keybind(parent, label)
         TextSize = 13, BorderSizePixel = 0, ZIndex = 2,
     }, parent)
     corner(btn, 6)
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    local val = make("TextLabel", {
+        Size = UDim2.new(0.5, -10, 1, 0), Position = UDim2.fromScale(0.5, 0), BackgroundTransparency = 1,
+        TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = THEME.muted,
+        Font = Enum.Font.Gotham, TextSize = 13, ZIndex = 3,
+    }, btn)
     local function refresh()
-        btn.Text = binding and (label .. ": press a key...") or (label .. ": " .. CFG.aimKey)
+        btn.Text = "  " .. label
+        val.Text = binding and "press a key..." or CFG.aimKey
     end
     bindRefresh = refresh
+    applyers.aimKey = function(v)
+        if type(v) == "string" then CFG.aimKey = v binding = false holding = false refresh() end
+    end
     refresh()
 
     on(btn.Activated, function()
@@ -820,6 +962,12 @@ local function colorBox(parent, label, onPick)
                 c + radius * math.cos(ang), c + radius * math.sin(ang),
                 thick + 1, arc, math.deg(ang))
         end
+    end
+
+    return function(color)   -- used by the Configs tab
+        preview.BackgroundColor3 = color
+        marker.Visible = false
+        onPick(color)
     end
 end
 
@@ -991,8 +1139,9 @@ end
 -- ESP tab
 local espPage = newPage("ESP")
 toggle(espPage, "Box ESP", "esp")
+toggle(espPage, "Names", "names")
 toggle(espPage, "Team check", "teamCheck")
-colorBox(espPage, "ESP color", function(color)
+applyers.outline = colorBox(espPage, "ESP color", function(color)
     CFG.outline, CFG.fill = color, color
     for _, b in pairs(boxes) do
         b.outline.Color = color
@@ -1065,14 +1214,1322 @@ else
     make("TextLabel", {
         Size = UDim2.new(1, -6, 0, 32), BackgroundTransparency = 1, TextWrapped = true,
         Text = "FPS cap unlock needs setfpscap, which this executor lacks.",
-        TextColor3 = Color3.fromRGB(255, 190, 110), Font = Enum.Font.Gotham, TextSize = 12, ZIndex = 2,
+        TextColor3 = Color3.fromRGB(196, 108, 20), Font = Enum.Font.Gotham, TextSize = 12, ZIndex = 2,
     }, perfPage)
 end
 make("TextLabel", {
     Size = UDim2.new(1, -6, 0, 92), BackgroundTransparency = 1, TextWrapped = true,
     Text = "Boost: low quality level, no shadows, plain materials, no textures, particles or effects.\nSuper: on top of that, lowest mesh detail, no mesh textures, accessories, lights, haze, clouds or grass, and ESP boxes drawn outline only. Turn off to restore.",
-    TextColor3 = Color3.fromRGB(150, 150, 160), Font = Enum.Font.Gotham, TextSize = 11, ZIndex = 2,
+    TextColor3 = THEME.muted, Font = Enum.Font.Gotham, TextSize = 11, ZIndex = 2,
 }, perfPage)
+
+-- SuS tab
+local susPage = newPage("SuS")
+
+-- Fly: camera-relative WASD, Space up, LeftControl down. Moves the root by CFrame each frame
+-- (no body movers, no PlatformStand), so the character stays upright and the game can't strip anything.
+local function flyStop()
+    local char = lp.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root then pcall(function() root.AssemblyLinearVelocity = Vector3.zero end) end
+end
+
+on(RunService.Heartbeat, function(dt)
+    if not CFG.fly or session.safeActive or session.stickActive then return end
+    local char = lp.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local cam = workspace.CurrentCamera
+    if not (root and hum and cam) or hum.Health <= 0 then return end
+
+    local dir = Vector3.zero
+    if not UIS:GetFocusedTextBox() then
+        local cf = cam.CFrame
+        if UIS:IsKeyDown(Enum.KeyCode.W) then dir += cf.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.S) then dir -= cf.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.D) then dir += cf.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.A) then dir -= cf.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.yAxis end
+        if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.yAxis end
+    end
+
+    -- hold position against gravity; face the camera's heading, upright
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    local look = cam.CFrame.LookVector
+    local flat = Vector3.new(look.X, 0, look.Z)
+    local pos = root.Position
+    if dir.Magnitude > 0 then pos += dir.Unit * CFG.flySpeed * dt end
+    if flat.Magnitude > 0.001 then
+        root.CFrame = CFrame.lookAt(pos, pos + flat)
+    else
+        root.CFrame = CFrame.new(pos) * (root.CFrame - root.Position)
+    end
+end)
+
+toggle(susPage, "Fly", "fly", function(v)
+    if not v then flyStop() end
+end)
+slider(susPage, "Fly speed", "flySpeed", 10, 300, 5)
+
+-- Noclip: each Stepped (before physics), switch off CanCollide on every character part.
+-- Only parts that were collidable get touched, and they are remembered so turning it off restores exactly those.
+do
+    local touched = {}
+
+    function session.noclipRestore()
+        for part in pairs(touched) do
+            if part.Parent then pcall(function() part.CanCollide = true end) end
+        end
+        table.clear(touched)
+    end
+
+    on(RunService.Stepped, function()
+        if not CFG.noclip then return end
+        local char = lp.Character
+        if not char then return end
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide then
+                touched[part] = true
+                part.CanCollide = false
+            end
+        end
+    end)
+
+    toggle(susPage, "Noclip", "noclip", function(v)
+        if not v then session.noclipRestore() end
+    end)
+end
+
+-- Khel Khatam: kill aura. The game's melee hit remote is now an obfuscated one (named "288") that takes
+-- (token, number, hit part, {}, nil, token). The tokens come from the game itself, so a hook captures the
+-- remote and tokens from your own real hits (land one normal hit after executing to prime it), then the
+-- aura replays that call at every living player/Enemies NPC within CFG.auraRange. Falls back to the old
+-- RE/RegisterHit shape if that remote exists and nothing has been captured.
+do
+    local MAX_TARGETS = 8
+    local combo = 0
+    local warned = {}
+    local function warnOnce(key, msg)
+        if warned[key] then return end
+        warned[key] = true
+        warn("[syncware] Khel Khatam: " .. msg)
+    end
+
+    local RegisterHit, RegisterAttack
+    local hitRemote, tokA, tokB, tokC
+    local loop
+
+    local function khelStop()
+        if loop then
+            pcall(task.cancel, loop)
+            loop = nil
+        end
+    end
+    session.khelStop = khelStop
+
+    local function resolveRemotes()
+        local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+        local net = mods and mods:FindFirstChild("Net")
+        RegisterHit = net and net:FindFirstChild("RE/RegisterHit")
+        RegisterAttack = net and net:FindFirstChild("RE/RegisterAttack")
+        return RegisterAttack ~= nil
+    end
+
+    -- capture: a non-script call with 6 args (string, number, part of a character, table, nil, string)
+    if hookmetamethod and newcclosure and checkcaller and getnamecallmethod then
+        pcall(function()
+            local old
+            old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                if env.SyncwareSession == session and not checkcaller() and getnamecallmethod() == "FireServer"
+                    and select("#", ...) == 6 then
+                    local a1, a2, a3, a4, a5, a6 = ...
+                    if type(a1) == "string" and type(a2) == "number" and typeof(a3) == "Instance" and type(a6) == "string" then
+                        local ok, isHit = pcall(function()
+                            return a3:IsA("BasePart") and a3.Parent ~= nil
+                                and a3.Parent:FindFirstChildOfClass("Humanoid") ~= nil
+                        end)
+                        if ok and isHit then
+                            hitRemote, tokA, tokB, tokC = self, a1, a2, a6
+                        end
+                    end
+                end
+                return old(self, ...)
+            end))
+        end)
+    end
+
+    local function hitPart(char)
+        return char:FindFirstChild("UpperTorso") or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+    end
+
+    local function strike(list)
+        if #list == 0 then return end
+        local ok, err = pcall(function()
+            if not hitRemote and not RegisterHit then
+                warnOnce("prime", "no hit captured yet - land one normal hit on an enemy, then it will start")
+                return
+            end
+            combo = combo % 4 + 1
+            RegisterAttack:FireServer(0.4, combo)   -- what a real swing sends: (cooldown, combo 1-4)
+            if hitRemote then
+                for _, e in ipairs(list) do
+                    hitRemote:FireServer(tokA, tokB, e.part, {}, nil, tokC)
+                end
+            else
+                local all = {}
+                for _, e in ipairs(list) do all[#all + 1] = {e.char, e.char:FindFirstChild("Head") or e.part} end
+                RegisterHit:FireServer(all[1][2], all)
+            end
+        end)
+        if not ok then warnOnce("strike", "fire failed - " .. tostring(err)) end
+    end
+
+    local function khelStart()
+        khelStop()
+        if not resolveRemotes() then
+            warn("[syncware] Khel Khatam: ReplicatedStorage.Modules.Net RE/RegisterAttack not found - aura off")
+            CFG.khelKhatam = false
+            sync("khelKhatam")
+            return
+        end
+        loop = task.spawn(function()
+            while CFG.khelKhatam and env.SyncwareSession == session do
+                task.wait(0.05)
+                local myRoot = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                if myRoot then
+                    local list = {}
+                    local function consider(char)
+                        local hum = char:FindFirstChildOfClass("Humanoid")
+                        local root = char:FindFirstChild("HumanoidRootPart")
+                        local part = hitPart(char)
+                        if hum and root and part and hum.Health > 0 then
+                            local d = (root.Position - myRoot.Position).Magnitude
+                            if d <= CFG.auraRange then list[#list + 1] = {char = char, part = part, dist = d} end
+                        end
+                    end
+
+                    for _, plr in ipairs(Players:GetPlayers()) do
+                        local char = plr ~= lp and plr.Character
+                        if char and not isTeammate(plr) then consider(char) end
+                    end
+                    local enemies = (not CFG.npcCheck) and workspace:FindFirstChild("Enemies") or nil
+                    if enemies then
+                        for _, npc in ipairs(enemies:GetChildren()) do consider(npc) end
+                    end
+
+                    table.sort(list, function(a, b) return a.dist < b.dist end)
+                    while #list > MAX_TARGETS do list[#list] = nil end
+                    strike(list)
+                end
+            end
+        end)
+    end
+
+    toggle(susPage, "Khel Khatam", "khelKhatam", function(v)
+        if v then khelStart() else khelStop() end
+    end)
+    slider(susPage, "Aura range", "auraRange", 10, 5000, 10)
+end
+
+-- Gun: gun aura. While on and a tool with ToolTip "Gun" is held, each Heartbeat it fires a burst of
+-- ShootGunEvent shots split across the nearest players/Enemies in range, sending a Validator2 code from the
+-- CombatController shoot function's upvalues every CFG.gunCacheShots shots. Needs debug upvalue functions.
+do
+    local conn
+    local startId = 0
+
+    local function gunStop()
+        startId = startId + 1
+        if conn then
+            pcall(function() conn:Disconnect() end)
+            conn = nil
+        end
+    end
+    session.gunStop = gunStop
+
+    local function gunFail(msg)
+        warn("[syncware] Gun: " .. msg)
+        CFG.gun = false
+        sync("gun")
+    end
+
+    local function gunStart()
+        gunStop()
+        startId = startId + 1
+        local myId = startId
+
+        local getupval = debug and debug.getupvalue or getupvalue
+        local setupval = debug and debug.setupvalue or setupvalue
+        local getupvals = debug and debug.getupvalues or getupvalues
+        if not (getupval and setupval and getupvals) then
+            gunFail("debug.getupvalue/setupvalue/getupvalues missing - gun aura off")
+            return
+        end
+
+        task.spawn(function()
+            local RS = game:GetService("ReplicatedStorage")
+            local mods = RS:WaitForChild("Modules", 5)
+            local net = mods and mods:WaitForChild("Net", 5)
+            local ShootGunEvent = net and net:WaitForChild("RE/ShootGunEvent", 5)
+            local remotes = RS:WaitForChild("Remotes", 5)
+            local Validator2 = remotes and remotes:WaitForChild("Validator2", 5)
+            local controllers = RS:WaitForChild("Controllers", 5)
+            local combatModule = controllers and controllers:WaitForChild("CombatController", 5)
+
+            if myId ~= startId or not CFG.gun then return end   -- toggled off / restarted while resolving
+            if not (ShootGunEvent and Validator2 and combatModule) then
+                gunFail("ShootGunEvent, Validator2 or CombatController not found - gun aura off")
+                return
+            end
+
+            local ShootFunction = nil
+            local V_Idx = {v26 = 12, v22 = 13, v25 = 14, v21 = 15, v23 = 16, v24 = 17, v27 = 18}
+
+            local function InitGun()
+                local ok, result = pcall(require, combatModule)
+                if ok and type(result) == "table" and result.Attack then
+                    ShootFunction = getupval(result.Attack, 9)
+                end
+            end
+
+            local function GetNextValidator()
+                if not ShootFunction then InitGun() end
+                if not ShootFunction then return 0, 0 end
+
+                local upvals = getupvals(ShootFunction)
+                if not upvals then return 0, 0 end
+
+                if upvals[V_Idx.v21] ~= 727595 then
+                    for i, v in pairs(upvals) do
+                        if v == 727595 then
+                            local offset = i - 15
+                            V_Idx.v21 = i
+                            V_Idx.v22 = 13 + offset
+                            V_Idx.v23 = 16 + offset
+                            V_Idx.v24 = 17 + offset
+                            V_Idx.v26 = 12 + offset
+                            V_Idx.v25 = 14 + offset
+                            V_Idx.v27 = 18 + offset
+                            break
+                        end
+                    end
+                end
+
+                local v1 = getupval(ShootFunction, V_Idx.v21)
+                local v2 = getupval(ShootFunction, V_Idx.v22)
+                local v3 = getupval(ShootFunction, V_Idx.v23)
+                local v4 = getupval(ShootFunction, V_Idx.v24)
+                local v5 = getupval(ShootFunction, V_Idx.v25)
+                local v6 = getupval(ShootFunction, V_Idx.v26)
+                local v7 = getupval(ShootFunction, V_Idx.v27)
+
+                if not (v1 and v2 and v3 and v4 and v5 and v6 and v7) then return 0, 0 end
+
+                local v8 = v6 * v2
+                local v9 = (v5 * v2 + v6 * v1) % v3
+                v9 = (v9 * v3 + v8) % v4
+                v5 = math.floor(v9 / v3)
+                v6 = v9 - v5 * v3
+                v7 = v7 + 1
+
+                setupval(ShootFunction, V_Idx.v25, v5)
+                setupval(ShootFunction, V_Idx.v26, v6)
+                setupval(ShootFunction, V_Idx.v27, v7)
+
+                return math.floor(v9 / v4 * 16777215), v7
+            end
+
+            -- nearest CFG.gunMaxTargets living Enemies NPCs and players inside CFG.gunRange
+            local function GetValidTargets()
+                local myRoot = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                if not myRoot then return {} end
+                local myPos = myRoot.Position
+                local found = {}
+
+                local enemies = (not CFG.npcCheck) and workspace:FindFirstChild("Enemies") or nil
+                if enemies then
+                    for _, npc in ipairs(enemies:GetChildren()) do
+                        local h = npc:FindFirstChildOfClass("Humanoid")
+                        local r = npc:FindFirstChild("HumanoidRootPart")
+                        if h and h.Health > 0 and r then
+                            local d = (r.Position - myPos).Magnitude
+                            if d <= CFG.gunRange then found[#found + 1] = {part = r, distance = d, hum = h} end
+                        end
+                    end
+                end
+
+                for _, plr in ipairs(Players:GetPlayers()) do
+                    if plr ~= lp and plr.Character and not isTeammate(plr) then
+                        local h = plr.Character:FindFirstChildOfClass("Humanoid")
+                        local r = plr.Character:FindFirstChild("HumanoidRootPart")
+                        if h and h.Health > 0 and r then
+                            local d = (r.Position - myPos).Magnitude
+                            if d <= CFG.gunRange then found[#found + 1] = {part = r, distance = d, hum = h} end
+                        end
+                    end
+                end
+
+                table.sort(found, function(a, b) return a.distance < b.distance end)
+                local out = {}
+                for i = 1, math.min(#found, CFG.gunMaxTargets) do out[i] = found[i].part end
+                return out, found
+            end
+
+            local cachedCode, cachedCount, cacheUses = 0, 0, 0
+            local locked = nil   -- single-target mode: {part, hum} currently being shot
+
+            -- one shot; false = no validator code available, abandon this burst
+            local function shoot(tool, part)
+                if cacheUses >= CFG.gunCacheShots or cachedCode == 0 then
+                    cachedCode, cachedCount = GetNextValidator()
+                    cacheUses = 0
+                    if cachedCode == 0 then return false end
+                end
+                if cacheUses == 0 then
+                    Validator2:FireServer(cachedCode, cachedCount)
+                end
+                tool:SetAttribute("LocalTotalShots", (tool:GetAttribute("LocalTotalShots") or 0) + 1)
+                ShootGunEvent:FireServer(part.Position, {part})
+                cacheUses = cacheUses + 1
+                return true
+            end
+
+            conn = RunService.Heartbeat:Connect(function()
+                if not CFG.gun or env.SyncwareSession ~= session then return end
+                pcall(function()
+                    local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
+                    if not tool or tool.ToolTip ~= "Gun" then return end
+
+                    local targets, entries = GetValidTargets()
+                    local n = #targets
+                    if n == 0 then locked = nil return end
+
+                    tool:SetAttribute("LocalOverheat", 0)
+
+                    -- single target: whole burst on one enemy until it dies / leaves range, then the next nearest
+                    if CFG.gunMode == "single" then
+                        local myRoot = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                        local keep = false
+                        if locked and myRoot and locked.part.Parent and locked.hum.Parent and locked.hum.Health > 0 then
+                            keep = (locked.part.Position - myRoot.Position).Magnitude <= CFG.gunRange
+                        end
+                        if not keep then locked = entries[1] end
+                        for _ = 1, CFG.gunBurst do
+                            if not shoot(tool, locked.part) then return end
+                        end
+                        return
+                    end
+
+                    local per = math.floor(CFG.gunBurst / n)
+                    local extra = CFG.gunBurst % n
+
+                    for t = 1, n do
+                        for _ = 1, per do
+                            if not shoot(tool, targets[t]) then return end
+                        end
+                    end
+                    for e = 1, extra do
+                        if not shoot(tool, targets[e]) then return end
+                    end
+                end)
+            end)
+        end)
+    end
+
+    toggle(susPage, "Gun", "gun", function(v)
+        if v then gunStart() else gunStop() end
+    end)
+    cycle(susPage, "Gun mode", "gunMode", {"spread", "single"})
+end
+
+-- NPC check, Auto V3, Auto V4, Anti stun.
+-- NPC check is read by ESP, silent aim, Khel Khatam and Gun (Enemies NPCs are skipped when it is on).
+-- Race remote / values below are the commonly used Blox Fruits ones, not verified against the current game build.
+do
+    local lastV3, lastV4, lastV4Log, acc = 0, 0, 0, 0
+
+    local function pressKey(code)
+        task.spawn(function()
+            pcall(function()
+                local vim = game:GetService("VirtualInputManager")
+                vim:SendKeyEvent(true, code, false, game)
+                task.wait(0.15)
+                vim:SendKeyEvent(false, code, false, game)
+            end)
+        end)
+    end
+
+    -- V4 straight through the Awakening tool's RemoteFunction, so the client-side "disable your transformation
+    -- first" check on the Y key never runs. Falls back to the Y key if the tool is missing.
+    local function fireV4(char)
+        task.spawn(function()
+            local ok, err = pcall(function()
+                local tool = lp.Backpack:FindFirstChild("Awakening") or char:FindFirstChild("Awakening")
+                local rf = tool and tool:FindFirstChild("RemoteFunction")
+                if not rf then error("Awakening RemoteFunction not found") end
+                rf:InvokeServer(true)
+            end)
+            if not ok then
+                warn("[syncware] V4: " .. tostring(err) .. " - falling back to Y")
+                pressKey(Enum.KeyCode.Y)
+            end
+        end)
+    end
+
+    on(RunService.Heartbeat, function(dt)
+        local char = lp.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not (char and hum) or hum.Health <= 0 then return end
+
+        -- anti stun: every frame
+        if CFG.antiStun then
+            local st = char:FindFirstChild("Stun")
+            if st then
+                if st:IsA("BoolValue") then
+                    if st.Value then st.Value = false end
+                elseif (st:IsA("NumberValue") or st:IsA("IntValue")) and st.Value ~= 0 then
+                    st.Value = 0
+                end
+            end
+            local a = char:GetAttribute("Stun")
+            if type(a) == "number" and a ~= 0 then char:SetAttribute("Stun", 0) end
+        end
+
+        -- race abilities: checked 4x a second
+        acc = acc + dt
+        if acc < 0.25 then return end
+        acc = 0
+        if UIS:GetFocusedTextBox() then return end
+        local now = os.clock()
+
+        -- V4: fired through the Awakening remote when the gauge is full and V4 is not on; works inside fruit transformations.
+        if CFG.autoV4 and now - lastV4 > 2 then
+            -- look on the character first, then on the player (the values can live in either while transformed)
+            local function val(name) return char:FindFirstChild(name) or lp:FindFirstChild(name, true) end
+            local energy = val("RaceEnergy")
+            local on4 = val("RaceTransformed")
+            local full = energy == nil or energy.Value >= 1   -- values can be hidden while transformed: then just try
+            local active = on4 and on4.Value == true
+            if full and not active then
+                lastV4 = now
+                fireV4(char)
+                -- diagnostics, at most every 6s: what the script saw when it pressed Y
+                if now - lastV4Log > 6 then
+                    lastV4Log = now
+                    local seen = {}
+                    for _, c in ipairs(char:GetChildren()) do
+                        local n = c.Name
+                        if n:find("Race") or n:find("Transform") or n:find("Stun") then seen[#seen + 1] = n end
+                    end
+                    warn("[syncware] V4: fired | energy=" .. tostring(energy and energy.Value)
+                        .. " transformed=" .. tostring(on4 and on4.Value)
+                        .. " | char has: " .. table.concat(seen, ","))
+                end
+            end
+        end
+
+        -- V3: fire the race ability remote on a timer
+        if CFG.autoV3 and now - lastV3 >= CFG.autoV3Interval then
+            lastV3 = now
+            pcall(function()
+                game:GetService("ReplicatedStorage").Remotes.CommE:FireServer("ActivateAbility")
+            end)
+        end
+    end)
+
+    toggle(susPage, "NPC check", "npcCheck")
+    toggle(susPage, "Auto V3", "autoV3")
+    toggle(susPage, "Auto V4", "autoV4")
+    toggle(susPage, "Anti stun", "antiStun")
+end
+
+-- Orbit: pick a player from the list, switch Orbit on, and the character circles them each Heartbeat
+-- (root CFrame, facing the target). Radius / speed / height live in CFG.
+do
+    local orbitPlayer = nil
+    local angle = 0
+    local phase = "approach"   -- "approach" = tween in to the ring, "orbit" = circling
+
+    local function orbitStop()
+        local root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if root then pcall(function() root.AssemblyLinearVelocity = Vector3.zero end) end
+    end
+    session.orbitStop = orbitStop
+
+    -- aim the approach at the ring point on our side of the target, and restart the tween-in
+    local function seedAngle()
+        local tRoot = orbitPlayer and orbitPlayer.Character and orbitPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if tRoot and root then
+            local d = root.Position - tRoot.Position
+            angle = math.atan2(d.Z, d.X)
+        end
+        phase = "approach"
+    end
+
+    toggle(susPage, "Orbit", "orbit", function(v)
+        if v then
+            if not orbitPlayer then
+                -- nothing to orbit yet: flip back off and open the list
+                CFG.orbit = false
+                sync("orbit")
+                session.orbitOpenList()
+                return
+            end
+            seedAngle()
+        else
+            orbitStop()
+        end
+    end)
+
+    slider(susPage, "Orbit distance", "orbitRadius", 3, 100, 1)
+    slider(susPage, "Orbit speed", "orbitSpeed", 0.5, 20, 0.5)
+
+    local header = make("TextButton", {
+        Size = UDim2.new(1, -6, 0, 28), BackgroundColor3 = THEME.row, BackgroundTransparency = ROW_T,
+        AutoButtonColor = false, TextColor3 = THEME.text, Font = Enum.Font.Gotham,
+        TextSize = 13, BorderSizePixel = 0, ZIndex = 2,
+    }, susPage)
+    corner(header, 6)
+
+    local listFrame = make("Frame", {
+        Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1, Visible = false, ZIndex = 2,
+    }, susPage)
+    make("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, listFrame)
+
+    local function nameOf(p)
+        if p.DisplayName ~= p.Name then return p.DisplayName .. " (@" .. p.Name .. ")" end
+        return p.Name
+    end
+
+    local function refreshHeader()
+        header.Text = "Orbit target: " .. (orbitPlayer and nameOf(orbitPlayer) or "none (tap to pick)")
+    end
+
+    local function rebuild(skip)
+        for _, c in ipairs(listFrame:GetChildren()) do
+            if c:IsA("GuiObject") then c:Destroy() end
+        end
+        local list = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= lp and p ~= skip then list[#list + 1] = p end
+        end
+        table.sort(list, function(a, b) return a.DisplayName:lower() < b.DisplayName:lower() end)
+
+        if #list == 0 then
+            make("TextLabel", {
+                Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, Text = "no other players in the server",
+                TextColor3 = THEME.muted, Font = Enum.Font.Gotham, TextSize = 12, ZIndex = 2,
+            }, listFrame)
+            return
+        end
+
+        for i, p in ipairs(list) do
+            local sel = (p == orbitPlayer)
+            local b = make("TextButton", {
+                Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = sel and THEME.accent or THEME.row,
+                BackgroundTransparency = sel and 0 or ROW_T, AutoButtonColor = false,
+                Text = "  " .. nameOf(p), TextXAlignment = Enum.TextXAlignment.Left,
+                TextColor3 = sel and Color3.fromRGB(255, 255, 255) or THEME.text,
+                Font = Enum.Font.Gotham, TextSize = 12, BorderSizePixel = 0, ZIndex = 2, LayoutOrder = i,
+            }, listFrame)
+            corner(b, 6)
+            b.Activated:Connect(function()
+                -- tapping the selected player again clears the selection
+                orbitPlayer = (orbitPlayer == p) and nil or p
+                if orbitPlayer and CFG.orbit then seedAngle() end
+                if not orbitPlayer and CFG.orbit then
+                    CFG.orbit = false
+                    sync("orbit")
+                    orbitStop()
+                end
+                refreshHeader()
+                rebuild()
+            end)
+        end
+    end
+
+    function session.orbitOpenList()
+        listFrame.Visible = true
+        rebuild()
+    end
+
+    on(header.Activated, function()
+        listFrame.Visible = not listFrame.Visible
+        if listFrame.Visible then rebuild() end
+    end)
+
+    on(Players.PlayerAdded, function() if listFrame.Visible then rebuild() end end)
+    on(Players.PlayerRemoving, function(p)
+        if p == orbitPlayer then
+            orbitPlayer = nil
+            if CFG.orbit then
+                CFG.orbit = false
+                sync("orbit")
+                orbitStop()
+            end
+            refreshHeader()
+        end
+        if listFrame.Visible then rebuild(p) end
+    end)
+
+    refreshHeader()
+
+    on(RunService.Heartbeat, function(dt)
+        if not CFG.orbit or session.safeActive or session.stickActive then return end
+        local tRoot = orbitPlayer and orbitPlayer.Character and orbitPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local char = lp.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not (tRoot and root and hum) or hum.Health <= 0 then return end
+
+        local c = tRoot.Position
+
+        -- approach: close the gap at a capped speed (a straight snap to the ring is what gets rubber-banded)
+        if phase == "approach" then
+            local goal = c + Vector3.new(math.cos(angle) * CFG.orbitRadius, CFG.orbitHeight, math.sin(angle) * CFG.orbitRadius)
+            local delta = goal - root.Position
+            local step = CFG.orbitTweenSpeed * dt
+            if delta.Magnitude > step + 1 then
+                local pos = root.Position + delta.Unit * step
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.CFrame = CFrame.lookAt(pos, Vector3.new(c.X, pos.Y, c.Z))
+                return
+            end
+            phase = "orbit"
+        end
+
+        angle = angle + CFG.orbitSpeed * dt
+        local pos = c + Vector3.new(math.cos(angle) * CFG.orbitRadius, CFG.orbitHeight, math.sin(angle) * CFG.orbitRadius)
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.CFrame = CFrame.lookAt(pos, Vector3.new(c.X, pos.Y, c.Z))
+    end)
+end
+
+-- Stick player: its own player list. Pick someone, switch Stick player on: you tween to them, then every
+-- Heartbeat your root is placed stickDistance studs behind them (same facing), so you follow wherever they go.
+-- Fly and orbit pause while it is active; safe mode still takes priority.
+do
+    local stickPlayer = nil
+
+    local function stickStop()
+        session.stickActive = false
+        local root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if root then pcall(function() root.AssemblyLinearVelocity = Vector3.zero end) end
+    end
+    session.stickStop = stickStop
+
+    toggle(susPage, "Stick player", "stick", function(v)
+        if v then
+            if not stickPlayer then
+                CFG.stick = false
+                sync("stick")
+                session.stickOpenList()
+            end
+        else
+            stickStop()
+        end
+    end)
+    slider(susPage, "Stick distance", "stickDistance", 0, 15, 1)
+
+    local header = make("TextButton", {
+        Size = UDim2.new(1, -6, 0, 28), BackgroundColor3 = THEME.row, BackgroundTransparency = ROW_T,
+        AutoButtonColor = false, TextColor3 = THEME.text, Font = Enum.Font.Gotham,
+        TextSize = 13, BorderSizePixel = 0, ZIndex = 2,
+    }, susPage)
+    corner(header, 6)
+
+    local listFrame = make("Frame", {
+        Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1, Visible = false, ZIndex = 2,
+    }, susPage)
+    make("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, listFrame)
+
+    local function nameOf(p)
+        if p.DisplayName ~= p.Name then return p.DisplayName .. " (@" .. p.Name .. ")" end
+        return p.Name
+    end
+
+    local function refreshHeader()
+        header.Text = "Stick target: " .. (stickPlayer and nameOf(stickPlayer) or "none (tap to pick)")
+    end
+
+    local function rebuild(skip)
+        for _, c in ipairs(listFrame:GetChildren()) do
+            if c:IsA("GuiObject") then c:Destroy() end
+        end
+        local list = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= lp and p ~= skip then list[#list + 1] = p end
+        end
+        table.sort(list, function(a, b) return a.DisplayName:lower() < b.DisplayName:lower() end)
+
+        if #list == 0 then
+            make("TextLabel", {
+                Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, Text = "no other players in the server",
+                TextColor3 = THEME.muted, Font = Enum.Font.Gotham, TextSize = 12, ZIndex = 2,
+            }, listFrame)
+            return
+        end
+
+        for i, p in ipairs(list) do
+            local sel = (p == stickPlayer)
+            local b = make("TextButton", {
+                Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = sel and THEME.accent or THEME.row,
+                BackgroundTransparency = sel and 0 or ROW_T, AutoButtonColor = false,
+                Text = "  " .. nameOf(p), TextXAlignment = Enum.TextXAlignment.Left,
+                TextColor3 = sel and Color3.fromRGB(255, 255, 255) or THEME.text,
+                Font = Enum.Font.Gotham, TextSize = 12, BorderSizePixel = 0, ZIndex = 2, LayoutOrder = i,
+            }, listFrame)
+            corner(b, 6)
+            b.Activated:Connect(function()
+                -- tapping the selected player again clears the selection
+                stickPlayer = (stickPlayer == p) and nil or p
+                if not stickPlayer and CFG.stick then
+                    CFG.stick = false
+                    sync("stick")
+                    stickStop()
+                end
+                refreshHeader()
+                rebuild()
+            end)
+        end
+    end
+
+    function session.stickOpenList()
+        listFrame.Visible = true
+        rebuild()
+    end
+
+    on(header.Activated, function()
+        listFrame.Visible = not listFrame.Visible
+        if listFrame.Visible then rebuild() end
+    end)
+
+    on(Players.PlayerAdded, function() if listFrame.Visible then rebuild() end end)
+    on(Players.PlayerRemoving, function(p)
+        if p == stickPlayer then
+            stickPlayer = nil
+            if CFG.stick then
+                CFG.stick = false
+                sync("stick")
+                stickStop()
+            end
+            refreshHeader()
+        end
+        if listFrame.Visible then rebuild(p) end
+    end)
+
+    refreshHeader()
+
+    on(RunService.Heartbeat, function(dt)
+        if not CFG.stick then session.stickActive = false return end
+        local tRoot = stickPlayer and stickPlayer.Character and stickPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local char = lp.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if session.safeActive or not (tRoot and root and hum) or hum.Health <= 0 then
+            session.stickActive = false
+            return
+        end
+        session.stickActive = true
+
+        local goalCF = tRoot.CFrame * CFrame.new(0, 0, CFG.stickDistance)
+        local delta = goalCF.Position - root.Position
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+
+        -- far away: tween in at stickSpeed; close: lock onto them every frame
+        local step = CFG.stickSpeed * dt
+        if delta.Magnitude > math.max(step, 6) then
+            local pos = root.Position + delta.Unit * step
+            root.CFrame = CFrame.lookAt(pos, pos + tRoot.CFrame.LookVector)
+        else
+            root.CFrame = goalCF
+        end
+    end)
+end
+
+-- fly key box: click, press a key, then that key toggles fly on/off
+do
+    local flyBinding = false
+    local btn = make("TextButton", {
+        Size = UDim2.new(1, -6, 0, 28), BackgroundColor3 = THEME.row, BackgroundTransparency = ROW_T,
+        AutoButtonColor = false, TextColor3 = THEME.text, Font = Enum.Font.Gotham,
+        TextSize = 13, BorderSizePixel = 0, ZIndex = 2,
+    }, susPage)
+    corner(btn, 6)
+    local function refresh()
+        btn.Text = flyBinding and "Fly key: press a key..." or ("Fly key: " .. tostring(CFG.flyKey))
+    end
+    refresh()
+    applyers.flyKey = function(v)
+        if type(v) == "string" then CFG.flyKey = v flyBinding = false refresh() end
+    end
+
+    on(btn.Activated, function()
+        flyBinding = true
+        refresh()
+    end)
+
+    on(UIS.InputBegan, function(i, gp)
+        if flyBinding then
+            if i.UserInputType == Enum.UserInputType.Keyboard or i.UserInputType.Name:find("MouseButton") then
+                -- ignore the click that started binding
+                if i.UserInputType == Enum.UserInputType.MouseButton1 and gp then return end
+                if i.KeyCode ~= Enum.KeyCode.Escape then
+                    CFG.flyKey = inputName(i)
+                end
+                flyBinding = false
+                refresh()
+            end
+            return
+        end
+        if not gp and not UIS:GetFocusedTextBox() and inputName(i) == CFG.flyKey then
+            CFG.fly = not CFG.fly
+            sync("fly")
+            if not CFG.fly then flyStop() end
+        end
+    end)
+end
+
+-- Safe mode: below CFG.safeHP percent HP, tween straight up CFG.safeHeight studs and hold there (fly/orbit pause).
+-- Once HP is safeRecover above the threshold it tweens back to the spot it left from. Turning it off mid-escape
+-- also returns you.
+do
+    local state = "idle"   -- idle | up | hold | down
+    local home, sky
+
+    local function stepTo(root, pos, dt)
+        local cur = root.Position
+        local delta = pos - cur
+        local step = CFG.safeSpeed * dt
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        if delta.Magnitude <= step then
+            root.CFrame = CFrame.new(pos) * (root.CFrame - root.Position)
+            return true
+        end
+        root.CFrame = CFrame.new(cur + delta.Unit * step) * (root.CFrame - root.Position)
+        return false
+    end
+
+    function session.safeStop()
+        state = "idle"
+        session.safeActive = false
+    end
+
+    on(RunService.Heartbeat, function(dt)
+        local char = lp.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not (root and hum) or hum.Health <= 0 then
+            state = "idle"
+            session.safeActive = false
+            return
+        end
+
+        local limitHP = hum.MaxHealth * CFG.safeHP / 100
+        local low = hum.Health < limitHP
+        -- back down only after healing safeRecover above the threshold (capped at max HP so it stays reachable)
+        local recovered = hum.Health >= math.min(hum.MaxHealth, limitHP + CFG.safeRecover)
+
+        if state == "idle" then
+            if CFG.safeMode and low then
+                home = root.Position
+                sky = home + Vector3.new(0, CFG.safeHeight, 0)
+                state = "up"
+            end
+        elseif state == "up" or state == "hold" then
+            if not CFG.safeMode or recovered then state = "down" end
+        elseif state == "down" then
+            if CFG.safeMode and low then state = "up" end
+        end
+
+        session.safeActive = state ~= "idle"
+        if state == "up" then
+            if stepTo(root, sky, dt) then state = "hold" end
+        elseif state == "hold" then
+            stepTo(root, sky, dt)
+        elseif state == "down" then
+            if stepTo(root, home, dt) then
+                state = "idle"
+                session.safeActive = false
+            end
+        end
+    end)
+
+    toggle(susPage, "Safe mode", "safeMode")
+    slider(susPage, "Safe HP %", "safeHP", 5, 95, 1)
+    slider(susPage, "Heal above", "safeRecover", 0, 10000, 100)
+    slider(susPage, "Safe height", "safeHeight", 500, 10000, 100)
+end
+
+-- Others tab
+local othersPage = newPage("Others")
+do
+    local armedAt = 0
+    local busy = false
+    local btn = make("TextButton", {
+        Size = UDim2.new(1, -6, 0, 28), BackgroundColor3 = THEME.row, BackgroundTransparency = ROW_T,
+        AutoButtonColor = false, Text = "Reset stats", TextColor3 = THEME.text, Font = Enum.Font.Gotham,
+        TextSize = 13, BorderSizePixel = 0, ZIndex = 2,
+    }, othersPage)
+    corner(btn, 6)
+    local status = make("TextLabel", {
+        Size = UDim2.new(1, -6, 0, 44), BackgroundTransparency = 1, TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+        Text = "Costs 2,500 Fragments. Click twice to confirm.",
+        TextColor3 = THEME.muted, Font = Enum.Font.Gotham, TextSize = 12, ZIndex = 2,
+    }, othersPage)
+
+    local function say(t) status.Text = t end
+
+    local function teamButton(team)
+        local b = make("TextButton", {
+            Size = UDim2.new(1, -6, 0, 28), BackgroundColor3 = THEME.row, BackgroundTransparency = ROW_T,
+            AutoButtonColor = false, Text = "Join " .. team, TextColor3 = THEME.text, Font = Enum.Font.Gotham,
+            TextSize = 13, BorderSizePixel = 0, ZIndex = 2,
+        }, othersPage)
+        corner(b, 6)
+        on(b.Activated, function()
+            task.spawn(function()
+                local ok, r = pcall(function()
+                    local rem = game:GetService("ReplicatedStorage"):WaitForChild("Remotes", 5)
+                    local commF = rem and rem:WaitForChild("CommF_", 5)
+                    if not commF then error("Remotes.CommF_ not found") end
+                    return commF:InvokeServer("SetTeam", team)
+                end)
+                if ok then
+                    say("Team " .. team .. ": " .. tostring(r))
+                    print("[syncware] SetTeam", team, "->", r)
+                else
+                    say("Team change failed: " .. tostring(r))
+                    warn("[syncware] SetTeam failed - " .. tostring(r))
+                end
+            end)
+        end)
+    end
+
+    -- CommF_ "BlackbeardReward","Refund","1" asks, "2" does it (the stat-refund NPC's calls). Return values are shown
+    -- so a changed build is visible instead of failing silently.
+    on(btn.Activated, function()
+        if busy then return end
+        if os.clock() - armedAt > 4 then
+            armedAt = os.clock()
+            btn.Text = "Click again to confirm (2,500 Fragments)"
+            task.delay(4, function()
+                if os.clock() - armedAt >= 4 then btn.Text = "Reset stats" end
+            end)
+            return
+        end
+        armedAt = 0
+        btn.Text = "Reset stats"
+        busy = true
+        task.spawn(function()
+            local ok, err = pcall(function()
+                local rem = game:GetService("ReplicatedStorage"):WaitForChild("Remotes", 5)
+                local commF = rem and rem:WaitForChild("CommF_", 5)
+                if not commF then error("Remotes.CommF_ not found") end
+                local r1 = commF:InvokeServer("BlackbeardReward", "Refund", "1")
+                local r2 = commF:InvokeServer("BlackbeardReward", "Refund", "2")
+                say("Check: " .. tostring(r1) .. " | Reset: " .. tostring(r2))
+                print("[syncware] reset stats - check:", r1, "reset:", r2)
+            end)
+            if not ok then
+                say("Reset failed: " .. tostring(err))
+                warn("[syncware] reset stats failed - " .. tostring(err))
+            end
+            busy = false
+        end)
+    end)
+
+    make("TextLabel", {
+        Size = UDim2.new(1, -6, 0, 18), BackgroundTransparency = 1, Text = "Team",
+        TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = THEME.muted,
+        Font = Enum.Font.GothamBold, TextSize = 12, ZIndex = 2,
+    }, othersPage)
+    teamButton("Marines")
+    teamButton("Pirates")
+end
+
+-- Configs tab: save every setting to Syncware/configs/<name>.json, load it later, and pick one to autoload on execute.
+-- Loading goes through the same controls (applyers), so toggles, sliders and the color wheel update and run their effects.
+-- Not saved: Orbit (it needs a player picked each session).
+do
+    local HttpService = game:GetService("HttpService")
+    local DIR, AUTO = "Syncware/configs", "Syncware/autoload.txt"
+    local cfgPage = newPage("Configs")
+
+    local fsOk = type(writefile) == "function" and type(readfile) == "function"
+        and type(listfiles) == "function" and type(isfile) == "function"
+        and type(isfolder) == "function" and type(makefolder) == "function"
+
+    if not fsOk then
+        warn("[syncware] writefile/readfile/listfiles/isfile/isfolder/makefolder missing - configs unavailable")
+        make("TextLabel", {
+            Size = UDim2.new(1, -6, 0, 48), BackgroundTransparency = 1, TextWrapped = true,
+            Text = "Configs need writefile, readfile, listfiles, isfile, isfolder and makefolder, which this executor lacks.",
+            TextColor3 = Color3.fromRGB(196, 108, 20), Font = Enum.Font.Gotham, TextSize = 12, ZIndex = 2,
+        }, cfgPage)
+    else
+        local selected = nil
+
+        local function sanitize(str)
+            str = tostring(str or ""):gsub("[^%w_%- ]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+            return str:sub(1, 32)
+        end
+
+        local function ensureDirs()
+            if not isfolder("Syncware") then makefolder("Syncware") end
+            if not isfolder(DIR) then makefolder(DIR) end
+        end
+
+        local function pathOf(name) return DIR .. "/" .. name .. ".json" end
+
+        local function listNames()
+            ensureDirs()
+            local names = {}
+            local ok, files = pcall(listfiles, DIR)
+            if ok and type(files) == "table" then
+                for _, f in ipairs(files) do
+                    local n = tostring(f):match("([^/\\]+)%.json$")
+                    if n then names[#names + 1] = n end
+                end
+            end
+            table.sort(names, function(a, b) return a:lower() < b:lower() end)
+            return names
+        end
+
+        local function getAutoload()
+            if isfile(AUTO) then
+                local ok, t = pcall(readfile, AUTO)
+                if ok then
+                    t = sanitize(t)
+                    if t ~= "" then return t end
+                end
+            end
+            return nil
+        end
+
+        local function snapshot()
+            local out = {}
+            for k, v in pairs(CFG) do
+                if k ~= "orbit" then
+                    if typeof(v) == "Color3" then
+                        out[k] = {
+                            r = math.floor(v.R * 255 + 0.5),
+                            g = math.floor(v.G * 255 + 0.5),
+                            b = math.floor(v.B * 255 + 0.5),
+                        }
+                    elseif type(v) == "number" or type(v) == "boolean" or type(v) == "string" then
+                        out[k] = v
+                    end
+                end
+            end
+            return out
+        end
+
+        local function applyConfig(data)
+            local keys = {}
+            for k in pairs(data) do
+                if k ~= "orbit" and CFG[k] ~= nil then keys[#keys + 1] = k end
+            end
+            table.sort(keys)   -- fpsBoost sorts before fpsSuper, which the FPS toggles rely on
+            local n = 0
+            for _, k in ipairs(keys) do
+                local v, cur = data[k], CFG[k]
+                if typeof(cur) == "Color3" then
+                    if type(v) == "table" and type(v.r) == "number" and type(v.g) == "number" and type(v.b) == "number" then
+                        v = Color3.fromRGB(math.clamp(v.r, 0, 255), math.clamp(v.g, 0, 255), math.clamp(v.b, 0, 255))
+                    else
+                        v = nil
+                    end
+                elseif type(v) ~= type(cur) then
+                    v = nil
+                end
+                if v ~= nil then
+                    local ok, err = pcall(function()
+                        if applyers[k] then applyers[k](v) else CFG[k] = v end
+                    end)
+                    if ok then n = n + 1 else warn("[syncware] config: could not apply " .. k .. " - " .. tostring(err)) end
+                end
+            end
+            return n
+        end
+
+        local function loadConfig(name)
+            local path = pathOf(name)
+            if not isfile(path) then return nil, "no config named " .. name end
+            local okR, raw = pcall(readfile, path)
+            if not okR then return nil, "could not read " .. name end
+            local okJ, data = pcall(function() return HttpService:JSONDecode(raw) end)
+            if not okJ or type(data) ~= "table" then return nil, name .. " is not a valid config" end
+            return applyConfig(data)
+        end
+
+        -- widgets
+        local box = make("TextBox", {
+            Size = UDim2.new(1, -6, 0, 28), BackgroundColor3 = THEME.row, BackgroundTransparency = ROW_T,
+            Text = "", PlaceholderText = "config name", PlaceholderColor3 = Color3.fromRGB(120, 120, 130),
+            ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left,
+            TextColor3 = THEME.text, Font = Enum.Font.Gotham, TextSize = 13, BorderSizePixel = 0, ZIndex = 2,
+        }, cfgPage)
+        corner(box, 6)
+        make("UIPadding", {PaddingLeft = UDim.new(0, 8)}, box)
+
+        local status
+        local function say(t) status.Text = t end
+
+        local listFrame
+        local function refreshList()
+            for _, c in ipairs(listFrame:GetChildren()) do
+                if c:IsA("GuiObject") then c:Destroy() end
+            end
+            local names = listNames()
+            local auto = getAutoload()
+            if #names == 0 then
+                make("TextLabel", {
+                    Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, Text = "no saved configs yet",
+                    TextColor3 = THEME.muted, Font = Enum.Font.Gotham, TextSize = 12, ZIndex = 2,
+                }, listFrame)
+                return
+            end
+            for i, name in ipairs(names) do
+                local sel = (name == selected)
+                local b = make("TextButton", {
+                    Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = sel and THEME.accent or THEME.row,
+                    BackgroundTransparency = sel and 0 or ROW_T, AutoButtonColor = false,
+                    Text = "  " .. name .. (name == auto and "   (autoload)" or ""),
+                    TextXAlignment = Enum.TextXAlignment.Left,
+                    TextColor3 = sel and Color3.fromRGB(255, 255, 255) or THEME.text,
+                    Font = Enum.Font.Gotham, TextSize = 12, BorderSizePixel = 0, ZIndex = 2, LayoutOrder = i,
+                }, listFrame)
+                corner(b, 6)
+                b.Activated:Connect(function()
+                    selected = name
+                    box.Text = name
+                    refreshList()
+                end)
+            end
+        end
+
+        -- which config an action means: the name typed in the box, else the highlighted row
+        local function target()
+            local n = sanitize(box.Text)
+            if n == "" then n = selected or "" end
+            return n
+        end
+
+        local function button(text, fn)
+            local b = make("TextButton", {
+                Size = UDim2.new(1, -6, 0, 28), BackgroundColor3 = THEME.row, BackgroundTransparency = ROW_T,
+                AutoButtonColor = false, Text = text, TextColor3 = THEME.text, Font = Enum.Font.Gotham,
+                TextSize = 13, BorderSizePixel = 0, ZIndex = 2,
+            }, cfgPage)
+            corner(b, 6)
+            on(b.Activated, function()
+                local ok, err = pcall(fn)
+                if not ok then say("error: " .. tostring(err)) end
+            end)
+            return b
+        end
+
+        button("Save", function()
+            local name = target()
+            if name == "" then say("type a config name first") return end
+            ensureDirs()
+            writefile(pathOf(name), HttpService:JSONEncode(snapshot()))
+            selected = name
+            box.Text = name
+            say("Saved " .. name)
+            refreshList()
+        end)
+
+        button("Load", function()
+            local name = target()
+            if name == "" then say("pick or type a config name") return end
+            local n, err = loadConfig(name)
+            if n then say("Loaded " .. name .. " (" .. n .. " settings)") else say(err) end
+        end)
+
+        if type(delfile) == "function" then
+            button("Delete", function()
+                local name = target()
+                if name == "" then say("pick or type a config name") return end
+                if not isfile(pathOf(name)) then say("no config named " .. name) return end
+                delfile(pathOf(name))
+                if getAutoload() == name then writefile(AUTO, "") end
+                if selected == name then selected = nil end
+                say("Deleted " .. name)
+                refreshList()
+            end)
+        end
+
+        button("Set autoload", function()
+            local name = target()
+            if name == "" then say("pick or type a config name") return end
+            if not isfile(pathOf(name)) then say("save " .. name .. " first") return end
+            ensureDirs()
+            writefile(AUTO, name)
+            say("Autoload: " .. name)
+            refreshList()
+        end)
+
+        button("Clear autoload", function()
+            ensureDirs()
+            writefile(AUTO, "")
+            say("Autoload cleared")
+            refreshList()
+        end)
+
+        status = make("TextLabel", {
+            Size = UDim2.new(1, -6, 0, 30), BackgroundTransparency = 1, TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left, Text = "",
+            TextColor3 = THEME.accent, Font = Enum.Font.Gotham, TextSize = 12, ZIndex = 2,
+        }, cfgPage)
+
+        make("TextLabel", {
+            Size = UDim2.new(1, -6, 0, 18), BackgroundTransparency = 1, Text = "Saved configs",
+            TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = THEME.muted,
+            Font = Enum.Font.GothamBold, TextSize = 12, ZIndex = 2,
+        }, cfgPage)
+
+        listFrame = make("Frame", {
+            Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1, ZIndex = 2,
+        }, cfgPage)
+        make("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, listFrame)
+
+        pcall(refreshList)
+
+        -- autoload: runs once, right after every control exists
+        local auto = getAutoload()
+        if auto then
+            local ok, n, err = pcall(loadConfig, auto)
+            if ok and n then
+                say("Autoloaded " .. auto .. " (" .. n .. " settings)")
+            else
+                warn("[syncware] autoload failed - " .. tostring(ok and err or n))
+                say("Autoload failed: " .. tostring(ok and err or n))
+            end
+        end
+    end
+end
+
+-- light theme: hairline border on every white row
+for _, o in ipairs(win:GetDescendants()) do
+    if o:IsA("GuiObject") and o.BackgroundColor3 == THEME.row and o.BackgroundTransparency < 1
+        and o.Size.Y.Offset >= 24 and not o:FindFirstChildOfClass("UIStroke") then
+        make("UIStroke", {Color = THEME.stroke, Thickness = 1}, o)
+        if o:IsA("TextButton") then
+            o.MouseEnter:Connect(function() tween(o, 0.1, {BackgroundColor3 = Color3.fromRGB(240, 242, 250)}) end)
+            o.MouseLeave:Connect(function() tween(o, 0.1, {BackgroundColor3 = THEME.row}) end)
+        end
+    end
+end
 
 showPage("ESP")
 setOpen(true)
@@ -1080,7 +2537,7 @@ setOpen(true)
 ------------------------------------------------------------------
 -- Hooks (last, wrapped so a missing executor function can't break the UI)
 ------------------------------------------------------------------
-local function active() return env.BenchSession == session end
+local function active() return env.SyncwareSession == session end
 
 local hooksOk = false
 if hookmetamethod and newcclosure and checkcaller and getnamecallmethod then
@@ -1118,29 +2575,43 @@ if hookmetamethod and newcclosure and checkcaller and getnamecallmethod then
 end
 
 if not hooksOk then
-    warn("[bench] hookmetamethod/newcclosure/checkcaller missing - silent aim inactive")
+    warn("[syncware] hookmetamethod/newcclosure/checkcaller missing - silent aim inactive")
     make("TextLabel", {
         Size = UDim2.new(1, -6, 0, 32), BackgroundTransparency = 1, TextWrapped = true,
-        Text = "Silent aim hooks unavailable on this executor.", TextColor3 = Color3.fromRGB(255, 120, 120),
+        Text = "Silent aim hooks unavailable on this executor.", TextColor3 = Color3.fromRGB(200, 60, 60),
         Font = Enum.Font.Gotham, TextSize = 12, ZIndex = 2,
     }, aimPage)
 end
 if not hasDrawing then
-    warn("[bench] Drawing library missing - ESP boxes and FOV circle inactive")
+    warn("[syncware] Drawing library missing - ESP boxes and FOV circle inactive")
 end
 if not dollarAsset then
-    warn("[bench] writefile/getcustomasset missing - using a text $ instead of the image")
+    warn("[syncware] writefile/getcustomasset missing - using a text $ instead of the image")
 end
 if not logoAsset then
-    warn("[bench] writefile/getcustomasset missing - using the drawn logo instead of the image")
+    warn("[syncware] writefile/getcustomasset missing - using the drawn logo instead of the image")
 end
 
-env.BenchUnload = function()
-    env.BenchSession = nil
+env.SyncwareUnload = function()
+    env.SyncwareSession = nil
     target = nil
     holding = false
     binding = false
     pcall(fpsRestore)
+    CFG.fly = false
+    pcall(flyStop)
+    CFG.noclip = false
+    pcall(session.noclipRestore)
+    CFG.khelKhatam = false
+    pcall(session.khelStop)
+    CFG.gun = false
+    pcall(session.gunStop)
+    CFG.orbit = false
+    pcall(session.orbitStop)
+    CFG.safeMode = false
+    pcall(session.safeStop)
+    CFG.stick = false
+    pcall(session.stickStop)
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     for _, d in ipairs(drawings) do pcall(function() d:Remove() end) end
     pcall(function() gui:Destroy() end)
